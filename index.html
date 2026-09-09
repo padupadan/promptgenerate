@@ -1,0 +1,446 @@
+import React, { useState, useRef } from 'react';
+import { Upload, FileText, Image as ImageIcon, Copy, Check, Loader2, Video, AlertCircle, Sparkles, Wand2 } from 'lucide-react';
+
+const apiKey = ""; // API key akan disediakan otomatis oleh lingkungan eksekusi
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState('videoPrompt');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
+  const [base64Data, setBase64Data] = useState(null);
+  const [mimeType, setMimeType] = useState(null);
+  const [additionalContext, setAdditionalContext] = useState('');
+  const [outputFormat, setOutputFormat] = useState('text');
+  
+  const [isLoading, setIsLoading] = useState(false);
+  const [resultText, setResultText] = useState('');
+  const [error, setError] = useState('');
+  const [isCopied, setIsCopied] = useState(false);
+
+  const fileInputRef = useRef(null);
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (file.size > 20 * 1024 * 1024) {
+        setError('Ukuran file terlalu besar. Maksimal 20MB agar sistem dapat memprosesnya dengan lancar.');
+        return;
+      }
+
+      setSelectedFile(file);
+      setMimeType(file.type);
+      
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setFilePreview(reader.result);
+        const base64String = reader.result.split(',')[1];
+        setBase64Data(base64String);
+      };
+      reader.readAsDataURL(file);
+      
+      setResultText('');
+      setError('');
+      setIsCopied(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file && (file.type.startsWith('image/') || file.type.startsWith('video/'))) {
+      const pseudoEvent = { target: { files: [file] } };
+      handleFileChange(pseudoEvent);
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.position = "fixed";
+
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+
+    try {
+      const successful = document.execCommand('copy');
+      if (successful) {
+        setIsCopied(true);
+        setTimeout(() => setIsCopied(false), 2000);
+      }
+    } catch (err) {
+      console.error('Gagal menyalin ke papan klip:', err);
+    }
+
+    document.body.removeChild(textArea);
+  };
+
+  const fetchWithRetry = async (url, options, retries = 5) => {
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(url, options);
+        if (!response.ok) {
+          throw new Error(`Gagal menghubungi AI (Status: ${response.status})`);
+        }
+        return await response.json();
+      } catch (error) {
+        if (i === retries - 1) throw error;
+        await new Promise(res => setTimeout(res, delays[i]));
+      }
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!base64Data) {
+      setError('Silakan unggah file terlebih dahulu.');
+      return;
+    }
+
+    setIsLoading(true);
+    setError('');
+    setResultText('');
+    setIsCopied(false);
+
+    try {
+      const systemInstructionBase = activeTab === 'videoPrompt' 
+        ? "Kamu adalah seorang Video Prompt Engineer ahli. Tugasmu adalah menganalisis video (atau gambar referensi) yang diunggah dan membuatkan 'Video Generation Prompt' yang sangat detail dalam BAHASA INGGRIS. Tujuannya agar video tersebut bisa direplikasi ulang menggunakan AI video generator (seperti Sora, Runway, atau Kling). Sertakan detail subjek, pergerakan kamera (camera movement: pan, tilt, zoom), pergerakan subjek, pencahayaan (lighting), gaya visual (visual style), dan suasana (mood)."
+        : "Kamu adalah seorang Prompt Engineer ahli. Tugasmu adalah menganalisis gambar yang diunggah dan membuatkan 'Image Generation Prompt' yang sangat detail dan deskriptif dalam BAHASA INGGRIS. Tujuannya agar gambar tersebut bisa direplikasi ulang menggunakan AI image generator (seperti Midjourney/DALL-E). Sertakan detail objek, gaya visual (art style), pencahayaan (lighting), warna, dan sudut kamera (camera angle).";
+
+      const formatInstruction = outputFormat === 'json'
+        ? " PENTING: Hasilkan output DALAM FORMAT JSON murni. Buat key yang relevan dengan analisis (seperti 'subject', 'lighting', 'visual_style', dll) dan sertakan satu key wajib bernama 'full_prompt' yang berisi gabungan prompt lengkapnya dalam satu kalimat/paragraf utuh."
+        : " PENTING: Hasilkan HANYA isi prompt-nya saja (langsung ke prompt bahasa Inggris), tanpa teks pengantar, tanpa judul, dan tanpa penjelasan apapun.";
+
+      const systemInstruction = systemInstructionBase + formatInstruction;
+
+      let userPrompt = activeTab === 'videoPrompt' 
+        ? "Buatkan prompt video mendetail dalam bahasa Inggris berdasarkan file ini."
+        : "Buatkan prompt gambar mendetail dalam bahasa Inggris berdasarkan gambar ini.";
+
+      if (additionalContext) {
+        userPrompt += ` Konteks tambahan dari pengguna: ${additionalContext}`;
+      }
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      
+      const payload = {
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: userPrompt },
+              {
+                inlineData: {
+                  mimeType: mimeType || "image/jpeg",
+                  data: base64Data
+                }
+              }
+            ]
+          }
+        ],
+        systemInstruction: {
+          parts: [{ text: systemInstruction }]
+        },
+        ...(outputFormat === 'json' && {
+          generationConfig: {
+            responseMimeType: "application/json"
+          }
+        })
+      };
+
+      const result = await fetchWithRetry(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const generatedText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (generatedText) {
+        if (outputFormat === 'json') {
+          try {
+            const jsonObj = JSON.parse(generatedText);
+            setResultText(JSON.stringify(jsonObj, null, 2));
+          } catch (e) {
+            setResultText(generatedText);
+          }
+        } else {
+          setResultText(generatedText);
+        }
+      } else {
+        throw new Error("Respon AI kosong atau format tidak sesuai.");
+      }
+
+    } catch (err) {
+      setError(err.message || "Terjadi kesalahan saat membuat konten.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 p-4 sm:p-6 md:p-8 font-sans relative overflow-hidden flex items-center justify-center">
+      
+      {/* Background Ambient Blobs */}
+      <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-purple-300/40 rounded-full blur-[100px] pointer-events-none"></div>
+      <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-blue-300/40 rounded-full blur-[100px] pointer-events-none"></div>
+      <div className="absolute top-[40%] left-[50%] translate-x-[-50%] w-[800px] h-[300px] bg-pink-200/30 rounded-full blur-[120px] pointer-events-none"></div>
+
+      <div className="relative w-full max-w-4xl bg-white/80 backdrop-blur-xl rounded-[2rem] shadow-2xl shadow-indigo-900/10 border border-white overflow-hidden">
+        
+        {/* Header */}
+        <div className="bg-gradient-to-br from-violet-600 via-purple-600 to-indigo-700 p-8 text-center text-white relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-full bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10 mix-blend-overlay"></div>
+          
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="bg-white/20 p-3 rounded-2xl backdrop-blur-md mb-4 shadow-lg ring-1 ring-white/30">
+              <Sparkles className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-3xl md:text-4xl font-extrabold mb-2 tracking-tight">
+              AI Prompt Generator
+            </h1>
+            <p className="text-violet-200 text-sm md:text-base mb-6 font-medium max-w-lg mx-auto">
+              Ubah video atau gambar Anda menjadi prompt AI yang sangat detail menggunakan kecerdasan model visi canggih.
+            </p>
+            <div className="inline-block bg-black/20 backdrop-blur-sm px-4 py-1.5 rounded-full border border-white/10">
+              <p className="text-white/90 text-xs font-semibold tracking-wider">
+                DIBUAT OLEH: <span className="text-white font-bold">FAISALRJ.88</span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Floating Segmented Tabs */}
+        {}
+        <div className="px-6 pt-8 pb-4">
+          <div className="flex p-1.5 bg-slate-100/80 rounded-2xl border border-slate-200/50 shadow-inner">
+            <button
+              onClick={() => setActiveTab('videoPrompt')}
+              className={`flex-1 py-3 px-6 text-sm font-bold flex items-center justify-center gap-2 rounded-xl transition-all duration-300 ${
+                activeTab === 'videoPrompt' 
+                  ? 'bg-white text-violet-700 shadow-md transform scale-[1.02]' 
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+              }`}
+            >
+              <Video className="w-4 h-4" />
+              1. Video ke Prompt
+            </button>
+            <button
+              onClick={() => setActiveTab('imagePrompt')}
+              className={`flex-1 py-3 px-6 text-sm font-bold flex items-center justify-center gap-2 rounded-xl transition-all duration-300 ${
+                activeTab === 'imagePrompt' 
+                  ? 'bg-white text-violet-700 shadow-md transform scale-[1.02]' 
+                  : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+              }`}
+            >
+              <ImageIcon className="w-4 h-4" />
+              2. Gambar ke Prompt
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 md:px-10 pb-10 pt-2 space-y-8">
+          
+          {/* Upload Section */}
+          {}
+          <div className="space-y-3">
+            <label className="block text-sm font-bold text-slate-700 ml-1">Unggah Media <span className="text-slate-400 font-normal">(Maks 20MB)</span></label>
+            <div 
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className="group border-2 border-dashed border-violet-200 hover:border-violet-500 bg-violet-50/30 hover:bg-violet-50/80 rounded-[1.5rem] p-8 text-center cursor-pointer transition-all duration-300 flex flex-col items-center justify-center min-h-[240px] relative overflow-hidden"
+            >
+              {filePreview ? (
+                <div className="relative w-full max-w-sm mx-auto z-10">
+                  {mimeType?.startsWith('video/') ? (
+                    <video 
+                      src={filePreview} 
+                      controls 
+                      className="w-full h-auto rounded-xl shadow-lg ring-4 ring-white max-h-64 object-contain bg-black/5"
+                    />
+                  ) : (
+                    <img 
+                      src={filePreview} 
+                      alt="Pratinjau" 
+                      className="w-full h-auto rounded-xl shadow-lg ring-4 ring-white max-h-64 object-contain bg-black/5"
+                    />
+                  )}
+                  <div className="mt-5 inline-flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm text-sm text-violet-600 font-bold group-hover:scale-105 transition-transform">
+                    <Upload className="w-4 h-4" /> Ubah File
+                  </div>
+                </div>
+              ) : (
+                <div className="z-10 flex flex-col items-center">
+                  <div className="bg-white p-5 rounded-full shadow-md mb-5 group-hover:scale-110 transition-transform duration-300 group-hover:shadow-violet-200">
+                    <Upload className="w-8 h-8 text-violet-500" />
+                  </div>
+                  <p className="text-slate-800 font-bold text-lg mb-1">Tarik & Lepaskan file di sini</p>
+                  <p className="text-slate-500 text-sm">atau klik untuk memilih (MP4, WEBM, JPG, PNG)</p>
+                </div>
+              )}
+              <input 
+                type="file" 
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept="video/*,image/*"
+                className="hidden"
+              />
+              <div className="absolute inset-0 bg-gradient-to-b from-transparent to-violet-100/50 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"></div>
+            </div>
+          </div>
+
+          {/* Context Input */}
+          {}
+          <div className="space-y-3">
+            <label className="block text-sm font-bold text-slate-700 ml-1">
+              Konteks Tambahan <span className="text-slate-400 font-normal">(Opsional)</span>
+            </label>
+            <input
+              type="text"
+              value={additionalContext}
+              onChange={(e) => setAdditionalContext(e.target.value)}
+              placeholder={activeTab === 'videoPrompt' 
+                ? "Contoh: Fokus pada pergerakan kamera, buat sangat sinematik..." 
+                : "Contoh: Tekankan pencahayaan, buat seperti hasil foto film 35mm..."}
+              className="w-full px-5 py-4 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-4 focus:ring-violet-500/20 focus:border-violet-500 outline-none transition-all text-slate-700 placeholder:text-slate-400 font-medium"
+            />
+          </div>
+
+          {/* Format Output Selection */}
+          <div className="space-y-3">
+            <label className="block text-sm font-bold text-slate-700 ml-1">Format Output</label>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <label className={`flex items-center gap-3 cursor-pointer p-4 border-2 rounded-xl transition-all duration-200 flex-1 ${outputFormat === 'text' ? 'border-violet-600 bg-violet-50 shadow-sm' : 'border-slate-200 hover:border-violet-300 hover:bg-slate-50'}`}>
+                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${outputFormat === 'text' ? 'border-violet-600' : 'border-slate-300'}`}>
+                  {outputFormat === 'text' && <div className="w-2.5 h-2.5 bg-violet-600 rounded-full" />}
+                </div>
+                <input 
+                  type="radio" 
+                  value="text" 
+                  checked={outputFormat === 'text'} 
+                  onChange={(e) => setOutputFormat(e.target.value)} 
+                  className="hidden"
+                />
+                <span className={`text-sm font-bold ${outputFormat === 'text' ? 'text-violet-900' : 'text-slate-600'}`}>Prompt Teks Biasa</span>
+              </label>
+              
+              <label className={`flex items-center gap-3 cursor-pointer p-4 border-2 rounded-xl transition-all duration-200 flex-1 ${outputFormat === 'json' ? 'border-violet-600 bg-violet-50 shadow-sm' : 'border-slate-200 hover:border-violet-300 hover:bg-slate-50'}`}>
+                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${outputFormat === 'json' ? 'border-violet-600' : 'border-slate-300'}`}>
+                  {outputFormat === 'json' && <div className="w-2.5 h-2.5 bg-violet-600 rounded-full" />}
+                </div>
+                <input 
+                  type="radio" 
+                  value="json" 
+                  checked={outputFormat === 'json'} 
+                  onChange={(e) => setOutputFormat(e.target.value)} 
+                  className="hidden"
+                />
+                <span className={`text-sm font-bold ${outputFormat === 'json' ? 'text-violet-900' : 'text-slate-600'}`}>Format JSON Terstruktur</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl flex items-start gap-3 text-sm animate-in fade-in slide-in-from-top-2">
+              <AlertCircle className="w-5 h-5 shrink-0 text-red-500" />
+              <p className="font-medium pt-0.5">{error}</p>
+            </div>
+          )}
+
+          {/* Action Button */}
+          {}
+          <button
+            onClick={handleGenerate}
+            disabled={isLoading || !selectedFile}
+            className={`relative w-full py-5 rounded-xl font-extrabold text-white text-lg transition-all duration-300 flex items-center justify-center gap-3 overflow-hidden ${
+              isLoading || !selectedFile 
+                ? 'bg-slate-300 text-slate-500 cursor-not-allowed' 
+                : 'bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:via-purple-500 hover:to-indigo-500 shadow-xl shadow-violet-600/30 hover:shadow-violet-600/50 hover:-translate-y-1'
+            }`}
+          >
+            {isLoading && (
+              <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+            )}
+            
+            {isLoading ? (
+              <>
+                <Loader2 className="w-6 h-6 animate-spin relative z-10" />
+                <span className="relative z-10">Menganalisis & Membuat Prompt...</span>
+              </>
+            ) : (
+              <>
+                <Wand2 className="w-6 h-6 relative z-10" />
+                <span className="relative z-10">
+                  {activeTab === 'videoPrompt' ? 'Buat Prompt Video' : 'Buat Prompt Gambar'}
+                </span>
+              </>
+            )}
+          </button>
+
+          {/* Results Area */}
+          {}
+          {resultText && (
+            <div className="mt-10 animate-in fade-in zoom-in-95 duration-500">
+              <div className="flex items-center justify-between mb-3 px-1">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-violet-600" /> 
+                  Hasil Prompt
+                </h3>
+                
+                <button
+                  onClick={() => copyToClipboard(resultText)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+                    isCopied 
+                      ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30' 
+                      : 'bg-slate-800 text-white hover:bg-slate-700 shadow-md shadow-slate-800/20'
+                  }`}
+                >
+                  {isCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  {isCopied ? 'Tersalin!' : 'Salin Prompt'}
+                </button>
+              </div>
+              
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 relative overflow-hidden shadow-2xl">
+                <div className="absolute top-4 right-4 flex gap-1.5 opacity-50">
+                  <div className="w-3 h-3 rounded-full bg-red-500/80"></div>
+                  <div className="w-3 h-3 rounded-full bg-amber-500/80"></div>
+                  <div className="w-3 h-3 rounded-full bg-emerald-500/80"></div>
+                </div>
+                
+                <div className="text-slate-300 text-sm md:text-base leading-relaxed whitespace-pre-wrap font-mono max-h-[500px] overflow-y-auto custom-scrollbar mt-6 select-text">
+                  {resultText}
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      <style dangerouslySetInnerHTML={{__html: `
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(255, 255, 255, 0.2);
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(255, 255, 255, 0.3);
+        }
+      `}} />
+    </div>
+  );
+}
